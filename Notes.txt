@@ -1,0 +1,498 @@
+
+//----------------------------------------------------------------
+
+    // Key/Value operations
+    // list operations
+    // Hash operations
+
+    /*
+    very simple text based = persistence: each line encodes a record
+    Memory-> File -> dump()
+    File -> Memory -> load()
+
+    K = Key value
+    L = List 
+    H = Hash
+
+    -----------------------------------------
+    "example :" 
+    key-value (K)
+    kv_map["name"] = "Alice"
+    K name Alice
+
+    List (L)
+    list_store["color"] = {"red", "blue", "orange"}
+    L color red blue orange
+
+    hahs_store["user:100"] = 
+    {
+        {"name":"prem"},
+        {"age":"21"}
+    }
+        H user:100 name:prem age:21 
+    -----------------------------------------
+
+    */
+
+    in Tcp socket programming we have 2 kernel buffers as
+
+    give a clear info about kernel buffers and their relation with epoll triggers
+
+Excellent question 🔥 — this is core Linux networking knowledge, especially for your Redis + epoll project.
+
+Let’s break it clearly and practically.
+
+🧠 1️⃣ What Are Kernel Buffers?
+
+When you create a TCP socket:
+
+socket(AF_INET, SOCK_STREAM, 0);
+
+
+The Linux kernel automatically creates two buffers per socket:
+
+Buffer	Purpose
+🟢 Receive Buffer (RX)	Stores incoming data
+🔵 Send Buffer (TX)	Stores outgoing data
+
+These are inside the kernel, not in your program.
+
+📦 Receive Buffer (RX Buffer)
+
+When client sends data:
+
+Client → Network → Kernel RX Buffer → Your recv()
+
+
+Data first goes into the kernel receive buffer.
+
+Only when you call:
+
+recv()
+
+
+You copy data from kernel buffer → user space.
+
+📤 Send Buffer (TX Buffer)
+
+When you call:
+
+send()
+
+
+Data does NOT immediately go to network.
+
+Instead:
+
+Your send() → Kernel TX Buffer → Network → Client
+
+
+The kernel manages actual transmission.
+
+🔥 Important: send() Success ≠ Data Delivered
+
+If send() returns success:
+
+It only means data was placed in kernel TX buffer
+
+It does NOT mean client received it
+
+🚀 2️⃣ How epoll Is Related
+
+epoll monitors these kernel buffers.
+
+It triggers events based on their state.
+
+🎯 EPOLLIN (Read Event)
+
+Triggered when:
+
+There is data available in the RX buffer.
+
+Meaning:
+
+Kernel RX buffer is NOT empty
+
+
+So:
+
+epoll_wait()
+
+
+returns EPOLLIN when:
+
+recv() would not block
+
+🎯 EPOLLOUT (Write Event)
+
+Triggered when:
+
+There is space available in the TX buffer.
+
+Meaning:
+
+Kernel TX buffer is NOT full
+
+
+So:
+
+send() would not block
+
+🔥 Important Behavior
+RX Buffer (EPOLLIN)
+RX Buffer State	EPOLLIN Triggered?
+Empty	❌ No
+Has data	✅ Yes
+TX Buffer (EPOLLOUT)
+TX Buffer State	EPOLLOUT Triggered?
+Full	❌ No
+Has space	✅ Yes
+⚠ Why EPOLLOUT Is Dangerous
+
+TX buffer is usually not full.
+
+That means:
+
+👉 EPOLLOUT is almost always ready
+👉 It keeps triggering continuously
+
+That’s why most servers:
+
+Register only EPOLLIN initially
+
+Register EPOLLOUT only when needed
+
+🧠 Real Server Pattern (Like Redis)
+Step 1 — Register for read
+events = EPOLLIN;
+
+
+When client sends command → EPOLLIN fires.
+
+Step 2 — Process command
+
+Generate response.
+
+Try sending:
+
+send()
+
+
+If:
+
+send() sends everything → done
+
+
+If:
+
+send() returns EAGAIN (buffer full)
+
+
+Then:
+
+Store remaining data
+
+Register EPOLLOUT
+
+Step 3 — When EPOLLOUT fires
+
+Send remaining data.
+
+If finished:
+
+Remove EPOLLOUT
+
+Go back to only EPOLLIN
+
+📌 What Happens If TX Buffer Is Full?
+
+When TX buffer is full:
+
+send() → returns -1
+errno = EAGAIN
+
+
+It does NOT block (if socket is non-blocking).
+
+You must wait for EPOLLOUT.
+
+🔬 Visual Diagram
+CLIENT
+   ↓
+Network
+   ↓
+[ Kernel RX Buffer ] ← EPOLLIN watches this
+   ↓
+recv()
+
+Your processing
+
+send()
+   ↓
+[ Kernel TX Buffer ] ← EPOLLOUT watches this
+   ↓
+Network
+   ↓
+CLIENT
+
+🧠 Important For Your Redis Project
+
+When using epoll:
+
+✔ You are monitoring kernel buffers
+✔ Not client buffers
+✔ Not your own memory
+
+Events are based purely on kernel socket state.
+
+🔥 Why epoll Is Non-Blocking
+
+Because:
+
+It tells you when buffers are ready
+
+You never block waiting
+
+You only act when safe
+
+Unlike multithreading where threads may block.
+
+⚡ Advanced: Edge Trigger vs Level Trigger
+Level Trigger (default)
+
+If RX buffer has data → EPOLLIN keeps triggering.
+
+Edge Trigger (EPOLLET)
+
+Triggers only when state changes:
+
+Empty → Non-empty
+
+So you must read until EAGAIN.
+
+🎯 Summary
+
+Kernel buffers are:
+
+RX buffer → for incoming data
+
+TX buffer → for outgoing data
+
+epoll triggers based on:
+
+Event	Trigger Condition
+EPOLLIN	RX buffer not empty
+EPOLLOUT	TX buffer not full
+
+Since you're building a Redis clone, understanding this deeply makes you think like a real systems engineer 🔥
+
+If you want next, I can explain:
+
+Why real Redis uses epoll internally
+
+How millions of connections are handled efficiently
+
+What happens when client is slow (backpressure)
+
+How zero-copy works in Linux networking
+
+epoll edge triggered
+
+Excellent 🔥 — now we’re entering real high-performance server territory.
+
+You asked about epoll edge triggered mode.
+
+Let’s understand it clearly and practically (especially for your Redis clone).
+
+📌 1️⃣ What Is Edge Triggered epoll?
+
+When using Linux epoll, there are two modes:
+
+Mode	Flag	Behavior
+Level Triggered	(default)	Repeats while condition is true
+Edge Triggered	EPOLLET	Triggers only when state changes
+🧠 The Core Idea
+🟢 Level Triggered (LT)
+
+If socket RX buffer has data:
+
+epoll keeps notifying you
+
+Until you read everything
+
+Safe and easy.
+
+🔵 Edge Triggered (ET)
+
+epoll notifies you ONLY when new data arrives.
+
+If you don’t read everything in one go:
+
+👉 You will NOT get notified again.
+
+This is the most important rule.
+
+🔥 Visual Example
+
+Assume client sends 100 bytes.
+
+🔹 Level Triggered
+
+RX buffer = 100 bytes
+
+epoll_wait → EPOLLIN
+You read 50 bytes
+
+RX buffer = 50 bytes
+
+epoll_wait → EPOLLIN again
+You read remaining 50
+
+✔ Safe
+
+🔹 Edge Triggered
+
+RX buffer = 100 bytes
+
+epoll_wait → EPOLLIN
+You read 50 bytes
+
+RX buffer = 50 bytes
+
+epoll_wait → ❌ Nothing
+
+Because no "new edge" happened.
+
+You missed the remaining 50 bytes.
+
+🎯 So What Must You Do in Edge Mode?
+
+You must:
+
+Read until recv() returns EAGAIN.
+
+Same for writing.
+
+✅ Correct Pattern for Edge Triggered
+while (true)
+{
+    ssize_t bytes = recv(fd, buffer, sizeof(buffer), 0);
+
+    if (bytes > 0)
+    {
+        // Process data
+    }
+    else if (bytes == -1 && errno == EAGAIN)
+    {
+        // No more data
+        break;
+    }
+    else
+    {
+        // Connection closed or error
+        close(fd);
+        break;
+    }
+}
+
+🚨 Golden Rule of Edge Triggered
+
+Always drain the socket completely.
+
+For reading:
+
+recv() until EAGAIN
+
+
+For writing:
+
+send() until EAGAIN
+
+📌 How To Enable Edge Triggered
+
+When registering fd:
+
+ev.events = EPOLLIN | EPOLLET;
+epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
+
+
+Also:
+
+⚠ Must set socket to NON-BLOCKING.
+
+fcntl(fd, F_SETFL, O_NONBLOCK);
+
+
+Edge triggered + blocking socket = disaster.
+
+🔥 Why Edge Triggered Is Faster
+
+Level triggered:
+
+epoll may repeatedly notify you
+
+More system calls
+
+Edge triggered:
+
+Fewer notifications
+
+Better scalability
+
+Used in high-performance servers
+
+🧠 How Real Redis Works
+
+Real Redis uses:
+
+epoll (on Linux)
+
+Edge triggered mode
+
+Non-blocking sockets
+
+Because it handles thousands/millions of connections efficiently.
+
+📊 LT vs ET Comparison
+Feature	Level Trigger	Edge Trigger
+Easy to use	✅	❌
+Safer	✅	❌
+High performance	Good	Excellent
+Requires loop until EAGAIN	Recommended	Mandatory
+Used in production servers	Sometimes	Yes
+🔥 Common Mistake In ET
+
+If you do:
+
+recv(fd, buffer, sizeof(buffer), 0);
+
+
+only once…
+
+You will randomly lose data.
+
+That’s the biggest beginner mistake.
+
+🎯 In Your Redis Project
+
+If you switch to:
+
+EPOLLIN | EPOLLET
+
+
+You must:
+
+✔ Set O_NONBLOCK
+✔ Read in loop
+✔ Write in loop
+✔ Handle partial sends
+
+Otherwise your server will behave unpredictably.
+
+🚀 Simple Definition
+
+Edge Triggered epoll:
+
+Notifies you only when buffer state changes from empty → non-empty (or full → non-full).
+
+You must fully drain buffers each time.
